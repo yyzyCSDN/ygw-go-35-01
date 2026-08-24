@@ -15,25 +15,27 @@ func NewSync() *Sync {
 }
 
 // MarkPending records a commit intent before durability.
+//
+// The intent stays in pending and does not become visible until the writer
+// side confirms the batch is durable, so readers never see an offset that
+// points past messages that may not yet be on disk.
 func (s *Sync) MarkPending(pid int, next int64) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.pending[pid] = next
-	// BUG(02b): the pending intent is immediately treated as visible, so the
-	// reader side publishes the offset before the writer side confirms the
-	// message batch is durable.
-	s.visible[pid] = next
 }
 
 // ConfirmVisible advances the visible offset once durable.
+//
+// The visible watermark advances only forward, so a stale or out-of-order
+// confirmation cannot regress it and re-expose already consumed messages.
 func (s *Sync) ConfirmVisible(pid int, off int64) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	// BUG(02d): the monotonic guard is dropped, so a stale unconfirmed offset
-	// can move the visible watermark backwards and readers re-see already
-	// consumed messages after a rollback.
-	s.visible[pid] = off
-	if s.pending[pid] <= off {
+	if off > s.visible[pid] {
+		s.visible[pid] = off
+	}
+	if s.pending[pid] <= s.visible[pid] {
 		delete(s.pending, pid)
 	}
 }

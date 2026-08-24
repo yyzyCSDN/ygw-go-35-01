@@ -27,24 +27,31 @@ func (m *Manager) Committed(pid int) int64 {
 }
 
 // Commit records an intent to advance the committed offset to next.
+//
+// It advances only the in-memory commit point; the durable checkpoint is left
+// untouched until Durable confirms the message batch has been persisted. A
+// crash between Commit and Durable therefore restores the previous durable
+// offset, so messages that were not yet durable are re-processed rather than
+// confirmed-and-lost.
 func (m *Manager) Commit(pid int, next int64) {
 	m.mu.Lock()
+	defer m.mu.Unlock()
 	m.commits[pid] = next
-	// BUG(02): Commit advances both the in-memory commit point and the durable
-	// checkpoint in one step, before the message batch has been confirmed on
-	// disk. A crash after Commit but before the append is durable therefore
-	// restores an offset that points past messages that were never persisted.
-	m.durable[pid] = next
-	m.mu.Unlock()
 }
 
-// Durable marks the committed offset as durably persisted.
+// Durable promotes the committed offset to the durable checkpoint.
+//
+// It is the durability barrier and must be called only after the message
+// batch up to the committed offset has been confirmed on disk. Because
+// Recover restores from durable alone, the durable checkpoint never points
+// past persisted messages. The watermark advances only forward, so a stale
+// confirmation can never regress it.
 func (m *Manager) Durable(pid int) int64 {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	// BUG(02c): durability confirmation is a no-op because Commit already wrote
-	// the durable state directly, so there is no separate barrier left to wait
-	// for and the offset can never lag behind the write.
+	if m.commits[pid] > m.durable[pid] {
+		m.durable[pid] = m.commits[pid]
+	}
 	return m.durable[pid]
 }
 
