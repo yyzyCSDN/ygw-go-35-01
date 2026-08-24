@@ -4,6 +4,14 @@ import "sort"
 
 // Rebalance reassigns partitions to the current members round-robin and
 // returns a mapping of member -> partition ids.
+//
+// The member set is rebuilt from the live membership table on every call so the
+// round-robin always reflects the members that are actually in the group right
+// now. A member that left (via Remove) is therefore dropped, and a member that
+// just joined is included, before partitions are handed out. The fresh
+// assignment is then written back to every current member — clearing the stale
+// partitions of members that no longer own any — so both the returned mapping
+// and CurrentAssignment/Snapshot stay consistent with the latest rebalance.
 func (c *Coordinator) Rebalance(group string, partitions []int) map[string][]int {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -11,19 +19,11 @@ func (c *Coordinator) Rebalance(group string, partitions []int) map[string][]int
 	if g == nil || len(g.Members) == 0 {
 		return map[string][]int{}
 	}
-	// BUG(01): the member set is cached from the previous rebalance and reused
-	// as-is; when a member leaves, Remove does not invalidate the cache, so the
-	// next rebalance keeps assigning partitions to a member that already left
-	// the group.
-	members := c.lastMembers[group]
-	if members == nil {
-		members = make([]string, 0, len(g.Members))
-		for id := range g.Members {
-			members = append(members, id)
-		}
-		sort.Strings(members)
-		c.lastMembers[group] = members
+	members := make([]string, 0, len(g.Members))
+	for id := range g.Members {
+		members = append(members, id)
 	}
+	sort.Strings(members)
 	sorted := append([]int(nil), partitions...)
 	sort.Ints(sorted)
 	assign := make(map[string][]int)
@@ -31,10 +31,8 @@ func (c *Coordinator) Rebalance(group string, partitions []int) map[string][]int
 		m := members[i%len(members)]
 		assign[m] = append(assign[m], p)
 	}
-	for id, ps := range assign {
-		if m := g.Members[id]; m != nil {
-			m.Partitions = ps
-		}
+	for id, m := range g.Members {
+		m.Partitions = append([]int(nil), assign[id]...)
 	}
 	g.Version++
 	return assign

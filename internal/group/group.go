@@ -12,15 +12,14 @@ import (
 
 // Coordinator manages consumer groups.
 type Coordinator struct {
-	mu          sync.Mutex
-	groups      map[string]*model.Group
-	lastMembers map[string][]string
-	now         func() time.Time
+	mu     sync.Mutex
+	groups map[string]*model.Group
+	now    func() time.Time
 }
 
 // New creates a coordinator.
 func New() *Coordinator {
-	return &Coordinator{groups: make(map[string]*model.Group), lastMembers: make(map[string][]string), now: time.Now}
+	return &Coordinator{groups: make(map[string]*model.Group), now: time.Now}
 }
 
 // Join adds a member to a group and bumps the group version.
@@ -97,9 +96,6 @@ func (c *Coordinator) Remove(group, member string) {
 	}
 	if _, ok := g.Members[member]; ok {
 		delete(g.Members, member)
-		// BUG(01b): the cached member list used by Rebalance is never refreshed
-		// when a member leaves, so the removed member keeps receiving partitions on
-		// the next rebalance even though it is gone from the membership table.
 		g.Version++
 	}
 }
