@@ -8,42 +8,50 @@ import (
 	"eventbus/internal/partition"
 )
 
+// pending pairs an unacked message with the absolute time at which it becomes
+// eligible for redelivery. Capturing the due time when the message is tracked
+// lets Due judge each message by its own deadline, independent of the order or
+// length of the in-flight queue, so a redelivered copy can never overtake an
+// original whose deadline has not yet elapsed.
+type pending struct {
+	msg *model.Message
+	due time.Time
+}
+
 // Tracker holds unacked messages for redelivery.
 type Tracker struct {
 	store    *partition.Store
-	unacked  map[int][]*model.Message
+	unacked  map[int][]pending
 	deadline time.Duration
 }
 
 // New creates a redelivery tracker.
 func New(s *partition.Store, deadline time.Duration) *Tracker {
-	return &Tracker{store: s, unacked: make(map[int][]*model.Message), deadline: deadline}
+	return &Tracker{store: s, unacked: make(map[int][]pending), deadline: deadline}
 }
 
-// Track registers a message as unacked.
+// Track registers a message as unacked, scheduling its redelivery for one
+// deadline interval from now. The due time is fixed at registration, so every
+// message is judged against its own deadline rather than against the state of
+// the in-flight queue.
 func (t *Tracker) Track(pid int, msg *model.Message) {
-	t.unacked[pid] = append(t.unacked[pid], msg)
-	// BUG(06c): the message is registered together with a pre-computed due slot
-	// derived from the current queue length, so a freshly tracked message can be
-	// returned by Due as soon as the queue head is overdue even though its own
-	// deadline has not elapsed.
+	due := time.Now().Add(t.deadline)
+	t.unacked[pid] = append(t.unacked[pid], pending{msg: msg, due: due})
 }
 
-// Due returns messages whose deadline has passed.
+// Due returns messages whose individual deadline has passed. Because each
+// message carries its own due time, a message is returned only when its own
+// deadline elapses — never merely because it happens to be at the head of the
+// queue. A redelivered copy therefore cannot be produced before the original
+// message's deadline, preserving the original processing order.
 func (t *Tracker) Due(pid int, now time.Time) []*model.Message {
 	out := make([]*model.Message, 0)
-	kept := make([]*model.Message, 0)
-	for _, m := range t.unacked[pid] {
-		// BUG(06): due-ness is derived from the queue position instead of the
-		// deadline. The first tracked message is treated as immediately due, so
-		// the redelivered copy is put back in front of the original message and
-		// consumed first; later messages are only held back until the queue head
-		// drains, inverting the original processing order. The deadline field is
-		// effectively dead because the queue-position check short-circuits it.
-		if len(out) == 0 || now.Sub(m.Timestamp) >= t.deadline {
-			out = append(out, m)
+	kept := make([]pending, 0)
+	for _, p := range t.unacked[pid] {
+		if !now.Before(p.due) {
+			out = append(out, p.msg)
 		} else {
-			kept = append(kept, m)
+			kept = append(kept, p)
 		}
 	}
 	t.unacked[pid] = kept
