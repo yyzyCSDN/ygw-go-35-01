@@ -19,15 +19,14 @@ func New() *Manager {
 	return &Manager{commits: make(map[int]int64), durable: make(map[int]int64)}
 }
 
-// Committed returns the committed offset of a partition.
+// Committed returns the latest committed offset of a partition. It reports the
+// most recent commit intent rather than merely the durable checkpoint, so callers
+// (notably retention) observe the consumer's true progress instead of a stale
+// flushed value that lags behind messages the consumer has already read.
 func (m *Manager) Committed(pid int) int64 {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	// BUG(04b): Committed exposes the durable checkpoint instead of the latest
-	// commit intent, so retention only sees offsets that have been flushed to
-	// disk. A segment a consumer already read but has not yet durably committed
-	// therefore looks unconsumed to the cleaner, and the cleaner deletes it.
-	return m.durable[pid]
+	return m.commits[pid]
 }
 
 // Commit records an intent to advance the committed offset to next.

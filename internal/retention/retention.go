@@ -21,8 +21,10 @@ func New(s *partition.Store, o *offset.Manager) *Cleaner {
 	return &Cleaner{store: s, offsets: o, now: time.Now}
 }
 
-// Clean removes expired segments, never dropping segments that still contain
-// messages a consumer has not committed past.
+// Clean removes an expired segment, but only once the consumer group has
+// committed past it. A segment that still holds messages a consumer has not
+// yet pulled is retained so the committed offset never dangles into space and
+// messages are never silently lost.
 func (c *Cleaner) Clean(p *model.Partition, seg string, cutoff time.Time) int {
 	msgs := c.store.Read(p.ID, seg, 0)
 	if len(msgs) == 0 {
@@ -32,15 +34,17 @@ func (c *Cleaner) Clean(p *model.Partition, seg string, cutoff time.Time) int {
 	if latest.Timestamp.After(cutoff) {
 		return 0
 	}
-	// BUG(04): the cleaner drops the segment as soon as it is older than the
-	// cutoff without consulting the consumer's committed offset. A segment that
-	// still holds messages the consumer has not pulled yet is therefore deleted
-	// and the consumer's offset dangles into empty space, silently losing the
-	// un-pulled messages. The alignment with consumer progress that the
-	// retention contract requires is simply skipped here.
+	// Align with consumer progress before deleting: drop the segment only when
+	// the consumer's committed offset has reached or passed the segment's end.
+	// end is the next offset after the last message in this segment, i.e. the
+	// offset a consumer must have committed to have consumed every message here.
+	end := c.store.SegmentEnd(p.ID, seg)
+	committed := c.offsets.Committed(p.ID)
+	if committed < end {
+		// The consumer still needs messages from this segment, so keep it even
+		// though it is older than the retention cutoff.
+		return 0
+	}
 	c.store.DropSegment(p.ID, seg)
-	// BUG(04d): after dropping the segment the committed offset is left
-	// dangling at a position beyond the last remaining message, so the next
-	// consumer fetch returns nothing and the messages are silently gone.
 	return len(msgs)
 }
